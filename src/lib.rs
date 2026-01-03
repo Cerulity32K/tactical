@@ -176,11 +176,11 @@ impl Display for Recoverability {
     }
 }
 /// Must be implemented for [`Syntax`] error types.
-pub trait HasRecoverability {
+pub trait SyntaxError {
     fn recoverability(&self) -> Recoverability;
     fn set_recoverability(&mut self, new_recoverability: Recoverability);
 }
-impl HasRecoverability for Recoverability {
+impl SyntaxError for Recoverability {
     fn recoverability(&self) -> Recoverability {
         *self
     }
@@ -203,7 +203,7 @@ macro_rules! cursor {
 }
 
 /// The type all syntactical elements implement. Allows parsing from and serialising to sequences of tokens.
-pub trait Syntax<Tok, E: HasRecoverability, D>: Sized {
+pub trait Syntax<Tok, E: SyntaxError, D>: Sized {
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E>;
     fn to_tokens(&self) -> Vec<(Span, Tok)>;
     fn span(&self) -> Span;
@@ -279,7 +279,7 @@ macro_rules! syntax {
 /// Currently, 32-element tuples are supported. `()` is not, as it has no span, though this may change. [`Null`] should be used in place of `()`.
 macro_rules! tuple_impl {
     ($T:ident) => {
-        impl<__Tok, __E: $crate::HasRecoverability, __D: Clone, $T: $crate::Syntax<__Tok, __E, __D>> $crate::Syntax<__Tok, __E, __D> for ($T,) {
+        impl<__Tok, __E: $crate::SyntaxError, __D: Clone, $T: $crate::Syntax<__Tok, __E, __D>> $crate::Syntax<__Tok, __E, __D> for ($T,) {
             fn from_tokens(__tokens: &mut $crate::cursor!(__Tok), __context: $crate::ParseContext<__D>) -> ::std::result::Result<Self, __E> {
                 let mut __try_tokens = __tokens.clone();
                 let __result = (<$T as $crate::Syntax<__Tok, __E, __D>>::from_tokens(&mut __try_tokens, __context.clone())?,);
@@ -295,7 +295,7 @@ macro_rules! tuple_impl {
         }
     };
     ($T:ident, $($Ts:ident),+) => {
-        impl<__Tok, __E: $crate::HasRecoverability, __D: Clone, $T: $crate::Syntax<__Tok, __E, __D>, $($Ts: $crate::Syntax<__Tok, __E, __D>),+>
+        impl<__Tok, __E: $crate::SyntaxError, __D: Clone, $T: $crate::Syntax<__Tok, __E, __D>, $($Ts: $crate::Syntax<__Tok, __E, __D>),+>
             $crate::Syntax<__Tok, __E, __D> for ($T, $($Ts),+) {
             fn from_tokens(__tokens: &mut $crate::cursor!(__Tok), __context: $crate::ParseContext<__D>) -> ::std::result::Result<Self, __E> {
                 let mut __try_tokens = __tokens.clone();
@@ -332,7 +332,7 @@ tuple_impl!(
 );
 
 /// Extension trait for parse results.
-pub trait ParseResultExt<T, E: HasRecoverability> {
+pub trait ParseResultExt<T, E: SyntaxError> {
     /// Turns a `Result<T>` into a `Result<Result<T>>` based on recoverability:
     /// - `Ok(Ok(_))` signifies success
     /// - `Ok(Err(_))` signifies a recoverable error
@@ -340,7 +340,7 @@ pub trait ParseResultExt<T, E: HasRecoverability> {
     /// Used for terser propagation; `(...).nest()?` propagates all unrecoverable errors but leaves recoverable errors checkable.
     fn nest(self) -> Result<Result<T, E>, E>;
 }
-impl<T, E: HasRecoverability> ParseResultExt<T, E> for Result<T, E> {
+impl<T, E: SyntaxError> ParseResultExt<T, E> for Result<T, E> {
     fn nest(self) -> Result<Result<T, E>, E> {
         match self {
             Ok(value) => Ok(Ok(value)),
@@ -354,7 +354,7 @@ impl<T, E: HasRecoverability> ParseResultExt<T, E> for Result<T, E> {
 
 /// Always succeds while parsing, but does not actually parse anything.
 pub struct Null(pub Span);
-impl<Tok, E: HasRecoverability, D> Syntax<Tok, E, D> for Null {
+impl<Tok, E: SyntaxError, D> Syntax<Tok, E, D> for Null {
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         Ok(Self(match tokens.clone().next() {
             Some((span, _)) => span,
@@ -371,7 +371,7 @@ impl<Tok, E: HasRecoverability, D> Syntax<Tok, E, D> for Null {
 /// Makes unrecoverable errors recoverable.
 #[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Try<T>(pub T);
-impl<Tok, E: HasRecoverability, D, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Try<T> {
+impl<Tok, E: SyntaxError, D, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Try<T> {
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         match T::from_tokens(tokens, context) {
             Ok(item) => Ok(Self(item)),
@@ -391,7 +391,7 @@ impl<Tok, E: HasRecoverability, D, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for T
 /// Makes recoverable errors unrecoverable.
 #[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Force<T>(pub T);
-impl<Tok, E: HasRecoverability, D, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Force<T> {
+impl<Tok, E: SyntaxError, D, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Force<T> {
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         match T::from_tokens(tokens, context) {
             Ok(item) => Ok(Self(item)),
@@ -470,7 +470,7 @@ pub struct Punctuated<T, By, Trail = AllowTrailing, Require = AnyCount> {
 }
 impl<
     Tok,
-    E: HasRecoverability + Debug,
+    E: SyntaxError + Debug,
     D: Clone,
     T: Syntax<Tok, E, D>,
     P: Syntax<Tok, E, D>,
@@ -551,7 +551,45 @@ impl<
     }
 }
 
-impl<Tok, E: HasRecoverability, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Vec<T> {
+/// Parses a sequence of elements, but will not go past the next given terminating item.
+pub struct Terminate<T, At> {
+    pub items: Vec<T>,
+    pub terminator: At,
+}
+impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>, At: Syntax<Tok, E, D>> Syntax<Tok, E, D>
+    for Terminate<T, At>
+{
+    fn from_tokens(
+        tokens: &mut cursor!(Tok),
+        context: ParseContext<D>,
+    ) -> std::result::Result<Self, E> {
+        let mut items = vec![];
+        let terminator = loop {
+            let mut try_tokens = tokens.clone();
+            match At::from_tokens(&mut try_tokens, context.clone()).nest()? {
+                Ok(terminator) => break terminator,
+                Err(_) => {
+                    items.push(T::from_tokens(tokens, context.clone())?);
+                }
+            }
+        };
+        Ok(Self { items, terminator })
+    }
+    fn to_tokens(&self) -> Vec<(Span, Tok)> {
+        self.items
+            .iter()
+            .flat_map(|item| item.to_tokens())
+            .collect()
+    }
+    fn span(&self) -> Span {
+        self.items
+            .iter()
+            .map(|item| item.span())
+            .fold(Span::null(), Add::add)
+    }
+}
+
+impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Vec<T> {
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         let mut out = vec![];
         loop {
@@ -579,7 +617,7 @@ impl<Tok, E: HasRecoverability, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D
     }
 }
 
-impl<Tok, E: HasRecoverability, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Option<T> {
+impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Option<T> {
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         let mut try_tokens = tokens.clone();
         match T::from_tokens(&mut try_tokens, context) {
@@ -610,7 +648,7 @@ impl<Tok, E: HasRecoverability, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D
 /// Implements [`Syntax`] for each given `W<T>` where `T: Into<W>` and `W: Deref<Target = T>`.
 macro_rules! wrapper_impl {
     ($($wrapper:ty),+) => {
-        $(impl<Tok, E: HasRecoverability, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for $wrapper {
+        $(impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for $wrapper {
             fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
                 Ok(T::from_tokens(tokens, context)?.into())
             }
