@@ -2,7 +2,6 @@ use std::{
     fmt::{Debug, Display},
     marker::PhantomData,
     ops::{Add, AddAssign},
-    sync::Arc,
 };
 
 /// A locational span of text.
@@ -204,9 +203,14 @@ macro_rules! cursor {
 
 /// The type all syntactical elements implement. Allows parsing from and serialising to sequences of tokens.
 pub trait Syntax<Tok, E: SyntaxError, D>: Sized {
+    type Item;
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E>;
     fn to_tokens(&self) -> Vec<(Span, Tok)>;
     fn span(&self) -> Span;
+    fn to_item(self) -> (Span, Self::Item);
+    fn parse(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<(Span, Self::Item), E> {
+        Ok(Self::from_tokens(tokens, context)?.to_item())
+    }
 }
 
 /// Internal macro used for summing a series of expressions.
@@ -280,6 +284,7 @@ macro_rules! syntax {
 macro_rules! tuple_impl {
     ($T:ident) => {
         impl<__Tok, __E: $crate::SyntaxError, __D: Clone, $T: $crate::Syntax<__Tok, __E, __D>> $crate::Syntax<__Tok, __E, __D> for ($T,) {
+            type Item = $T;
             fn from_tokens(__tokens: &mut $crate::cursor!(__Tok), __context: $crate::ParseContext<__D>) -> ::std::result::Result<Self, __E> {
                 let mut __try_tokens = __tokens.clone();
                 let __result = (<$T as $crate::Syntax<__Tok, __E, __D>>::from_tokens(&mut __try_tokens, __context.clone())?,);
@@ -292,11 +297,19 @@ macro_rules! tuple_impl {
             fn span(&self) -> $crate::Span {
                 <$T as $crate::Syntax<__Tok, __E, __D>>::span(&self.0)
             }
+            fn parse(__tokens: &mut $crate::cursor!(__Tok), __context: $crate::ParseContext<__D>) -> ::std::result::Result<(Span, Self::Item), __E> {
+                let item = Self::from_tokens(__tokens, __context)?;
+                Ok((item.span(), item.0))
+            }
+            fn to_item(self) -> (Span, Self::Item) {
+                (self.0.span(), self.0)
+            }
         }
     };
     ($T:ident, $($Ts:ident),+) => {
         impl<__Tok, __E: $crate::SyntaxError, __D: Clone, $T: $crate::Syntax<__Tok, __E, __D>, $($Ts: $crate::Syntax<__Tok, __E, __D>),+>
             $crate::Syntax<__Tok, __E, __D> for ($T, $($Ts),+) {
+            type Item = Self;
             fn from_tokens(__tokens: &mut $crate::cursor!(__Tok), __context: $crate::ParseContext<__D>) -> ::std::result::Result<Self, __E> {
                 let mut __try_tokens = __tokens.clone();
                 let __result = (
@@ -321,6 +334,9 @@ macro_rules! tuple_impl {
                     <$T as $crate::Syntax<__Tok, __E, __D>>::span($T),
                     $(<$Ts as $crate::Syntax<__Tok, __E, __D>>::span($Ts)),+
                 )
+            }
+            fn to_item(self) -> (Span, Self::Item) {
+                (self.span(), self)
             }
         }
         tuple_impl!($($Ts),+);
@@ -355,6 +371,7 @@ impl<T, E: SyntaxError> ParseResultExt<T, E> for Result<T, E> {
 /// Always succeds while parsing, but does not actually parse anything.
 pub struct Null(pub Span);
 impl<Tok, E: SyntaxError, D> Syntax<Tok, E, D> for Null {
+    type Item = ();
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         Ok(Self(match tokens.clone().next() {
             Some((span, _)) => span,
@@ -367,11 +384,15 @@ impl<Tok, E: SyntaxError, D> Syntax<Tok, E, D> for Null {
     fn span(&self) -> Span {
         self.0
     }
+    fn to_item(self) -> (Span, Self::Item) {
+        (self.0, ())
+    }
 }
 /// Makes unrecoverable errors recoverable.
 #[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Try<T>(pub T);
 impl<Tok, E: SyntaxError, D, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Try<T> {
+    type Item = T::Item;
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         match T::from_tokens(tokens, context) {
             Ok(item) => Ok(Self(item)),
@@ -387,11 +408,15 @@ impl<Tok, E: SyntaxError, D, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Try<T> 
     fn span(&self) -> Span {
         self.0.span()
     }
+    fn to_item(self) -> (Span, Self::Item) {
+        self.0.to_item()
+    }
 }
 /// Makes recoverable errors unrecoverable.
 #[derive(Clone, Copy, Default, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Force<T>(pub T);
 impl<Tok, E: SyntaxError, D, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Force<T> {
+    type Item = T::Item;
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         match T::from_tokens(tokens, context) {
             Ok(item) => Ok(Self(item)),
@@ -406,6 +431,9 @@ impl<Tok, E: SyntaxError, D, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Force<T
     }
     fn span(&self) -> Span {
         self.0.span()
+    }
+    fn to_item(self) -> (Span, Self::Item) {
+        self.0.to_item()
     }
 }
 
@@ -478,6 +506,7 @@ impl<
     Require: ElementRequirementRule,
 > Syntax<Tok, E, D> for Punctuated<T, P, Trail, Require>
 {
+    type Item = Vec<(Span, T::Item)>;
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         let first_span = tokens
             .clone()
@@ -549,6 +578,15 @@ impl<
     fn span(&self) -> Span {
         self.span
     }
+    fn to_item(self) -> (Span, Self::Item) {
+        (
+            self.span,
+            self.items
+                .into_iter()
+                .map(|(item, _)| item.to_item())
+                .collect(),
+        )
+    }
 }
 
 /// Parses a sequence of elements, but will not go past the next given terminating item.
@@ -559,6 +597,7 @@ pub struct Terminate<T, At> {
 impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>, At: Syntax<Tok, E, D>> Syntax<Tok, E, D>
     for Terminate<T, At>
 {
+    type Item = Vec<(Span, T::Item)>;
     fn from_tokens(
         tokens: &mut cursor!(Tok),
         context: ParseContext<D>,
@@ -567,7 +606,10 @@ impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>, At: Syntax<Tok, E, D>>
         let terminator = loop {
             let mut try_tokens = tokens.clone();
             match At::from_tokens(&mut try_tokens, context.clone()).nest()? {
-                Ok(terminator) => break terminator,
+                Ok(terminator) => {
+                    *tokens = try_tokens;
+                    break terminator;
+                }
                 Err(_) => {
                     items.push(T::from_tokens(tokens, context.clone())?);
                 }
@@ -587,9 +629,16 @@ impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>, At: Syntax<Tok, E, D>>
             .map(|item| item.span())
             .fold(Span::null(), Add::add)
     }
+    fn to_item(self) -> (Span, Self::Item) {
+        (
+            self.span(),
+            self.items.into_iter().map(|item| item.to_item()).collect(),
+        )
+    }
 }
 
 impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Vec<T> {
+    type Item = Self;
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         let mut out = vec![];
         loop {
@@ -615,9 +664,13 @@ impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for 
             .reduce(|a, b| a + b)
             .unwrap_or(Span::null())
     }
+    fn to_item(self) -> (Span, Self::Item) {
+        (self.span(), self)
+    }
 }
 
 impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Option<T> {
+    type Item = Self;
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         let mut try_tokens = tokens.clone();
         match T::from_tokens(&mut try_tokens, context) {
@@ -643,12 +696,36 @@ impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for 
             None => Span::null(),
         }
     }
+    fn to_item(self) -> (Span, Self::Item) {
+        (self.span(), self)
+    }
+}
+
+/// Retains the richer structure of a syntactical element.
+/// 
+/// `KeepElements::<T>::parse` will call `T::from_tokens` instead of `T::parse`.
+pub struct KeepElements<T>(pub T);
+impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for KeepElements<T> {
+    type Item = T;
+    fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
+        Ok(Self(T::from_tokens(tokens, context)?))
+    }
+    fn to_tokens(&self) -> Vec<(Span, Tok)> {
+        self.0.to_tokens()
+    }
+    fn span(&self) -> Span {
+        self.0.span()
+    }
+    fn to_item(self) -> (Span, Self::Item) {
+        (self.span(), self.0)
+    }
 }
 
 /// Implements [`Syntax`] for each given `W<T>` where `T: Into<W>` and `W: Deref<Target = T>`.
 macro_rules! wrapper_impl {
     ($($wrapper:ty),+) => {
         $(impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for $wrapper {
+            type Item = T::Item;
             fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
                 Ok(T::from_tokens(tokens, context)?.into())
             }
@@ -658,8 +735,11 @@ macro_rules! wrapper_impl {
             fn span(&self) -> Span {
                 (**self).span()
             }
+            fn to_item(self) -> (Span, Self::Item) {
+                (*self).to_item()
+            }
         })+
     };
 }
 
-wrapper_impl!(Box<T>, Arc<T>);
+wrapper_impl!(Box<T>);
