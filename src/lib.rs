@@ -703,7 +703,7 @@ impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for 
 
 /// Retains the richer structure of a syntactical element.
 /// 
-/// `KeepElements::<T>::parse` will call `T::from_tokens` instead of `T::parse`.
+/// `KeepElements::<T>::to_item` will not call `T::to_item` and will instead just return `T`.
 pub struct KeepElements<T>(pub T);
 impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for KeepElements<T> {
     type Item = T;
