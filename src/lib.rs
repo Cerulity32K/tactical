@@ -461,6 +461,12 @@ impl<Tok, E: SyntaxError, D, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Force<T
         self.0.to_item()
     }
 }
+#[macro_export]
+macro_rules! ForceIf {
+    ($($try_types:ty),+ => $($force_types:ty),+) => {
+        ($($crate::Try<$try_types>),+, $($crate::Force<$force_types>),+)
+    };
+}
 
 /// Requirements for whether or not punctuation can trail.
 trait TrailingRule {
@@ -492,38 +498,46 @@ impl TrailingRule for DenyTrailing {
 }
 
 /// Requirements for the number of elements in a sequence.
-trait ElementRequirementRule {
+trait ElementCountRule {
     fn matches(element_count: usize) -> bool;
 }
-/// Any number of items can appear in a sequence.
+/// Any number of items will match this rule.
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AnyCount;
-impl ElementRequirementRule for AnyCount {
+impl ElementCountRule for AnyCount {
     fn matches(_: usize) -> bool {
         true
     }
 }
-/// At least `N` elements must appear in a sequence.
+/// No number of items will match this rule.
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Never;
+impl ElementCountRule for Never {
+    fn matches(_: usize) -> bool {
+        false
+    }
+}
+/// At least `N` items will match this rule.
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AtLeast<const N: usize>;
-impl<const N: usize> ElementRequirementRule for AtLeast<N> {
+impl<const N: usize> ElementCountRule for AtLeast<N> {
     fn matches(element_count: usize) -> bool {
         element_count >= N
     }
 }
 
-/// At most `N` element must appear in a sequence.
+/// At most `N` elements will match this rule.
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AtMost<const N: usize>;
-impl<const N: usize> ElementRequirementRule for AtMost<N> {
+impl<const N: usize> ElementCountRule for AtMost<N> {
     fn matches(element_count: usize) -> bool {
         element_count <= N
     }
 }
-/// At least `N` elements must appear in a sequence.
+/// At least `N` elements will match this rule.
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Exactly<const N: usize>;
-impl<const N: usize> ElementRequirementRule for Exactly<N> {
+impl<const N: usize> ElementCountRule for Exactly<N> {
     fn matches(element_count: usize) -> bool {
         element_count == N
     }
@@ -533,10 +547,10 @@ impl<const N: usize> ElementRequirementRule for Exactly<N> {
 ///
 /// Allows trailing by default, as well as zero elements, but this can be overridden.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Separated<T, By, Trail = AllowTrailing, Require = AnyCount> {
+pub struct Separated<T, By, Trail = AllowTrailing, AllowCount = AnyCount, ForceAfter = Never> {
     pub span: Span,
     pub items: Vec<(T, Option<By>)>,
-    _pd: PhantomData<(Trail, Require)>,
+    _pd: PhantomData<(Trail, AllowCount, ForceAfter)>,
 }
 impl<
     Tok,
@@ -545,8 +559,9 @@ impl<
     T: Syntax<Tok, E, D>,
     By: Syntax<Tok, E, D>,
     Trail: TrailingRule,
-    Require: ElementRequirementRule,
-> Syntax<Tok, E, D> for Separated<T, By, Trail, Require>
+    AllowCount: ElementCountRule,
+    ForceAfter: ElementCountRule,
+> Syntax<Tok, E, D> for Separated<T, By, Trail, AllowCount, ForceAfter>
 {
     type Item = Vec<(T::Item, Option<By::Item>)>;
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
@@ -561,8 +576,12 @@ impl<
             let item = T::from_tokens(&mut try_tokens, context.clone()).nest()?;
             let item = match item {
                 Ok(item) => item,
-                Err(err) => {
-                    if (items.is_empty() || Trail::matches(true)) && Require::matches(items.len()) {
+                Err(mut err) => {
+                    if ForceAfter::matches(items.len()) {
+                        err.set_recoverability(Recoverability::Unrecoverable);
+                        return Err(err);
+                    }
+                    if (items.is_empty() || Trail::matches(true)) && AllowCount::matches(items.len()) {
                         // we have a correct number of items,
                         // and either trailing punctuation is allowed,
                         // or we don't have anything to begin with
@@ -580,7 +599,7 @@ impl<
                     items.push((item, Some(punct)));
                 }
                 Err(err) => {
-                    if Trail::matches(false) && Require::matches(items.len() + 1) {
+                    if Trail::matches(false) && AllowCount::matches(items.len() + 1) {
                         // we have a correct number of items and no trailing punctuation
                         items.push((item, None));
                         break 'parse_loop;
@@ -630,8 +649,8 @@ impl<
 
 /// See [`Separated`]. Erases punctuation when `parse`ing.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Punctuated<T, By, Trail = AllowTrailing, Require = AnyCount>(
-    pub Separated<T, By, Trail, Require>,
+pub struct Punctuated<T, By, Trail = AllowTrailing, Require = AnyCount, ForceAfter = Never>(
+    pub Separated<T, By, Trail, Require, ForceAfter>,
 );
 impl<
     Tok,
@@ -640,8 +659,9 @@ impl<
     T: Syntax<Tok, E, D>,
     By: Syntax<Tok, E, D>,
     Trail: TrailingRule,
-    Require: ElementRequirementRule,
-> Syntax<Tok, E, D> for Punctuated<T, By, Trail, Require>
+    Require: ElementCountRule,
+    ForceAfter: ElementCountRule,
+> Syntax<Tok, E, D> for Punctuated<T, By, Trail, Require, ForceAfter>
 {
     type Item = Vec<T::Item>;
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
