@@ -219,9 +219,12 @@ macro_rules! __sum {
     ($expr:expr) => { $expr };
     ($expr:expr, $($exprs:expr),+) => { ($expr) + $crate::__sum!($($exprs),+) };
 }
+
+#[doc(hidden)]
+pub use paste::paste as __paste;
 #[macro_export]
 macro_rules! syntax {
-    ([$($attrs:tt)*] $type_vis:vis struct $type_name:ident: $token_type:ty, $data_type:ty => !$error_type:ty { $($field_vis:vis $field_name:ident: $field_type:ty),+ $(,)? }) => {
+    ([$($type_attrs:tt)*] $type_vis:vis struct $type_name:ident: $token_type:ty, $data_type:ty => !$error_type:ty { $($field_vis:vis $field_name:ident: $field_type:ty),+ $(,)? }) => {
         $($attrs)* $type_vis struct $type_name {
             __span: $crate::Span,
             $($field_vis $field_name: $field_type),+
@@ -243,26 +246,36 @@ macro_rules! syntax {
         }
     };
     ([$($attrs:tt)*] $type_vis:vis enum $type_name:ident: $token_type:ty, $data_type:ty => !$error_type:ty[$error_ctor:expr] { $($name:literal => $variant_name:ident($inner:ty)),+ $(,)? }) => {
+        $crate::__paste!($crate::syntax!([$($attrs)*] $type_vis enum $type_name dissolves to [$($attrs)*] $type_vis enum [<$type_name Item>]: $token_type, $data_type => !$error_type[$error_ctor] { $($name => $variant_name($inner)),+ }););
+    };
+    ([$($attrs:tt)*] $type_vis:vis enum $type_name:ident dissolves to [$($item_attrs:tt)*] $item_vis:vis enum $item_name:ident: $token_type:ty, $data_type:ty => !$error_type:ty[$error_ctor:expr] { $($name:literal => $variant_name:ident($inner:ty)),+ $(,)? }) => {
         $($attrs)* $type_vis enum $type_name {
             $($variant_name($inner)),+
         }
+        $($attrs)* $type_vis enum $item_name {
+            $($variant_name(<$inner as $crate::Syntax<$token_type, $error_type, $data_type>>::Item)),+
+        }
         impl $crate::Syntax<$token_type, $error_type, $data_type> for $type_name {
+            type Item = $item_name;
             fn from_tokens(__tokens: &mut $crate::cursor!($token_type), __context: $crate::ParseContext<$data_type>) -> ::std::result::Result<Self, $error_type> {
                 let __first_span = __tokens.clone().next().map(|(__span, _)| __span).unwrap_or(__context.eof_span());
                 let mut __errors = vec![];
                 $(
                     let mut __try_tokens = __tokens.clone();
-                    match <$inner>::from_tokens(&mut __try_tokens, __context.clone()).nest()? {
+                    match <$inner>::from_tokens(&mut __try_tokens, __context.clone()) {
                         Ok(__expr) => {
                             *__tokens = __try_tokens;
                             return Ok(Self::$variant_name(__expr));
                         },
+                        Err(__err) if $crate::SyntaxError::recoverability(&__err) == $crate::Recoverability::Unrecoverable => {
+                            return Err(__err);
+                        }
                         Err(__err) => __errors.push(__err),
                     };
                 )*
                 Err(($error_ctor)([$($name),*].into_iter().zip(__errors), __first_span))
             }
-            fn to_tokens(&self) -> Vec<(Span, Token)> {
+            fn to_tokens(&self) -> Vec<(Span, $token_type)> {
                 match self {
                     $(Self::$variant_name(__inner) => <$inner as $crate::Syntax<$token_type, $error_type, $data_type>>::to_tokens(__inner)),+
                 }
@@ -270,6 +283,14 @@ macro_rules! syntax {
             fn span(&self) -> Span {
                 match self {
                     $(Self::$variant_name(__inner) => <$inner as $crate::Syntax<$token_type, $error_type, $data_type>>::span(__inner)),+
+                }
+            }
+            fn to_item(self) -> ($crate::Span, Self::Item) {
+                match self {
+                    $(Self::$variant_name(__inner) => {
+                        let item = <$inner as $crate::Syntax<$token_type, $error_type, $data_type>>::to_item(__inner);
+                        (item.0, <$item_name>::$variant_name(item.1))
+                    }),+
                 }
             }
         }
@@ -309,7 +330,7 @@ macro_rules! tuple_impl {
     ($T:ident, $($Ts:ident),+) => {
         impl<__Tok, __E: $crate::SyntaxError, __D: Clone, $T: $crate::Syntax<__Tok, __E, __D>, $($Ts: $crate::Syntax<__Tok, __E, __D>),+>
             $crate::Syntax<__Tok, __E, __D> for ($T, $($Ts),+) {
-            type Item = Self;
+            type Item = ((Span, $T::Item), $((Span, $Ts::Item)),+);
             fn from_tokens(__tokens: &mut $crate::cursor!(__Tok), __context: $crate::ParseContext<__D>) -> ::std::result::Result<Self, __E> {
                 let mut __try_tokens = __tokens.clone();
                 let __result = (
@@ -336,7 +357,13 @@ macro_rules! tuple_impl {
                 )
             }
             fn to_item(self) -> (Span, Self::Item) {
-                (self.span(), self)
+                let __span = <Self as $crate::Syntax<__Tok, __E, __D>>::span(&self);
+                #[allow(non_snake_case)]
+                let ($T, $($Ts),+) = self;
+                (__span, (
+                    <$T as $crate::Syntax<__Tok, __E, __D>>::to_item($T),
+                    $(<$Ts as $crate::Syntax<__Tok, __E, __D>>::to_item($Ts)),+
+                ))
             }
         }
         tuple_impl!($($Ts),+);
@@ -638,7 +665,7 @@ impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>, At: Syntax<Tok, E, D>>
 }
 
 impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Vec<T> {
-    type Item = Self;
+    type Item = Vec<(Span, T::Item)>;
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         let mut out = vec![];
         loop {
@@ -665,12 +692,15 @@ impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for 
             .unwrap_or(Span::null())
     }
     fn to_item(self) -> (Span, Self::Item) {
-        (self.span(), self)
+        (
+            self.span(),
+            self.into_iter().map(|item| item.to_item()).collect(),
+        )
     }
 }
 
 impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Option<T> {
-    type Item = Self;
+    type Item = Option<T::Item>;
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         let mut try_tokens = tokens.clone();
         match T::from_tokens(&mut try_tokens, context) {
@@ -697,12 +727,12 @@ impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for 
         }
     }
     fn to_item(self) -> (Span, Self::Item) {
-        (self.span(), self)
+        (self.span(), self.map(|item| item.to_item().1))
     }
 }
 
 /// Retains the richer structure of a syntactical element.
-/// 
+///
 /// `KeepElements::<T>::to_item` will not call `T::to_item` and will instead just return `T`.
 pub struct KeepElements<T>(pub T);
 impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for KeepElements<T> {
