@@ -207,8 +207,8 @@ pub trait Syntax<Tok, E: SyntaxError, D>: Sized {
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E>;
     fn to_tokens(&self) -> Vec<(Span, Tok)>;
     fn span(&self) -> Span;
-    fn to_item(self) -> (Span, Self::Item);
-    fn parse(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<(Span, Self::Item), E> {
+    fn to_item(self) -> Self::Item;
+    fn parse(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self::Item, E> {
         Ok(Self::from_tokens(tokens, context)?.to_item())
     }
 }
@@ -285,11 +285,10 @@ macro_rules! syntax {
                     $(Self::$variant_name(__inner) => <$inner as $crate::Syntax<$token_type, $error_type, $data_type>>::span(__inner)),+
                 }
             }
-            fn to_item(self) -> ($crate::Span, Self::Item) {
+            fn to_item(self) -> Self::Item {
                 match self {
                     $(Self::$variant_name(__inner) => {
-                        let item = <$inner as $crate::Syntax<$token_type, $error_type, $data_type>>::to_item(__inner);
-                        (item.0, <$item_name>::$variant_name(item.1))
+                        <$item_name>::$variant_name(<$inner as $crate::Syntax<$token_type, $error_type, $data_type>>::to_item(__inner))
                     }),+
                 }
             }
@@ -318,19 +317,18 @@ macro_rules! tuple_impl {
             fn span(&self) -> $crate::Span {
                 <$T as $crate::Syntax<__Tok, __E, __D>>::span(&self.0)
             }
-            fn parse(__tokens: &mut $crate::cursor!(__Tok), __context: $crate::ParseContext<__D>) -> ::std::result::Result<(Span, Self::Item), __E> {
-                let item = Self::from_tokens(__tokens, __context)?;
-                Ok((item.span(), item.0))
+            fn parse(__tokens: &mut $crate::cursor!(__Tok), __context: $crate::ParseContext<__D>) -> ::std::result::Result<Self::Item, __E> {
+                Ok(Self::from_tokens(__tokens, __context)?.0)
             }
-            fn to_item(self) -> (Span, Self::Item) {
-                (self.0.span(), self.0)
+            fn to_item(self) -> Self::Item {
+                self.0
             }
         }
     };
     ($T:ident, $($Ts:ident),+) => {
         impl<__Tok, __E: $crate::SyntaxError, __D: Clone, $T: $crate::Syntax<__Tok, __E, __D>, $($Ts: $crate::Syntax<__Tok, __E, __D>),+>
             $crate::Syntax<__Tok, __E, __D> for ($T, $($Ts),+) {
-            type Item = ((Span, $T::Item), $((Span, $Ts::Item)),+);
+            type Item = ($T::Item, $($Ts::Item),+);
             fn from_tokens(__tokens: &mut $crate::cursor!(__Tok), __context: $crate::ParseContext<__D>) -> ::std::result::Result<Self, __E> {
                 let mut __try_tokens = __tokens.clone();
                 let __result = (
@@ -356,14 +354,14 @@ macro_rules! tuple_impl {
                     $(<$Ts as $crate::Syntax<__Tok, __E, __D>>::span($Ts)),+
                 )
             }
-            fn to_item(self) -> (Span, Self::Item) {
+            fn to_item(self) -> Self::Item {
                 let __span = <Self as $crate::Syntax<__Tok, __E, __D>>::span(&self);
                 #[allow(non_snake_case)]
                 let ($T, $($Ts),+) = self;
-                (__span, (
+                (
                     <$T as $crate::Syntax<__Tok, __E, __D>>::to_item($T),
                     $(<$Ts as $crate::Syntax<__Tok, __E, __D>>::to_item($Ts)),+
-                ))
+                )
             }
         }
         tuple_impl!($($Ts),+);
@@ -411,8 +409,8 @@ impl<Tok, E: SyntaxError, D> Syntax<Tok, E, D> for Null {
     fn span(&self) -> Span {
         self.0
     }
-    fn to_item(self) -> (Span, Self::Item) {
-        (self.0, ())
+    fn to_item(self) -> Self::Item {
+        ()
     }
 }
 /// Makes unrecoverable errors recoverable.
@@ -435,7 +433,7 @@ impl<Tok, E: SyntaxError, D, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Try<T> 
     fn span(&self) -> Span {
         self.0.span()
     }
-    fn to_item(self) -> (Span, Self::Item) {
+    fn to_item(self) -> Self::Item {
         self.0.to_item()
     }
 }
@@ -459,7 +457,7 @@ impl<Tok, E: SyntaxError, D, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Force<T
     fn span(&self) -> Span {
         self.0.span()
     }
-    fn to_item(self) -> (Span, Self::Item) {
+    fn to_item(self) -> Self::Item {
         self.0.to_item()
     }
 }
@@ -497,14 +495,6 @@ impl TrailingRule for DenyTrailing {
 trait ElementRequirementRule {
     fn matches(element_count: usize) -> bool;
 }
-/// At least one element must appear in a sequence.
-#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RequireOne;
-impl ElementRequirementRule for RequireOne {
-    fn matches(element_count: usize) -> bool {
-        element_count > 0
-    }
-}
 /// Any number of items can appear in a sequence.
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AnyCount;
@@ -513,12 +503,37 @@ impl ElementRequirementRule for AnyCount {
         true
     }
 }
+/// At least `N` elements must appear in a sequence.
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AtLeast<const N: usize>;
+impl<const N: usize> ElementRequirementRule for AtLeast<N> {
+    fn matches(element_count: usize) -> bool {
+        element_count >= N
+    }
+}
+
+/// At most `N` element must appear in a sequence.
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AtMost<const N: usize>;
+impl<const N: usize> ElementRequirementRule for AtMost<N> {
+    fn matches(element_count: usize) -> bool {
+        element_count <= N
+    }
+}
+/// At least `N` elements must appear in a sequence.
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Exactly<const N: usize>;
+impl<const N: usize> ElementRequirementRule for Exactly<N> {
+    fn matches(element_count: usize) -> bool {
+        element_count == N
+    }
+}
 
 /// Parses a sequence of elements separated by some other element.
 ///
-/// Allows trailing punctuation by default, as well as zero elements, but this can be overridden.
+/// Allows trailing by default, as well as zero elements, but this can be overridden.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Punctuated<T, By, Trail = AllowTrailing, Require = AnyCount> {
+pub struct Separated<T, By, Trail = AllowTrailing, Require = AnyCount> {
     pub span: Span,
     pub items: Vec<(T, Option<By>)>,
     _pd: PhantomData<(Trail, Require)>,
@@ -528,12 +543,12 @@ impl<
     E: SyntaxError + Debug,
     D: Clone,
     T: Syntax<Tok, E, D>,
-    P: Syntax<Tok, E, D>,
+    By: Syntax<Tok, E, D>,
     Trail: TrailingRule,
     Require: ElementRequirementRule,
-> Syntax<Tok, E, D> for Punctuated<T, P, Trail, Require>
+> Syntax<Tok, E, D> for Separated<T, By, Trail, Require>
 {
-    type Item = Vec<(Span, T::Item)>;
+    type Item = Vec<(T::Item, Option<By::Item>)>;
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         let first_span = tokens
             .clone()
@@ -559,7 +574,7 @@ impl<
             };
             *tokens = try_tokens;
             try_tokens = tokens.clone();
-            match P::from_tokens(&mut try_tokens, context.clone()).nest()? {
+            match By::from_tokens(&mut try_tokens, context.clone()).nest()? {
                 Ok(punct) => {
                     *tokens = try_tokens;
                     items.push((item, Some(punct)));
@@ -605,14 +620,45 @@ impl<
     fn span(&self) -> Span {
         self.span
     }
-    fn to_item(self) -> (Span, Self::Item) {
-        (
-            self.span,
-            self.items
-                .into_iter()
-                .map(|(item, _)| item.to_item())
-                .collect(),
-        )
+    fn to_item(self) -> Self::Item {
+        self.items
+            .into_iter()
+            .map(|(item, separator)| (item.to_item(), separator.to_item()))
+            .collect()
+    }
+}
+
+/// See [`Separated`]. Erases punctuation when `parse`ing.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Punctuated<T, By, Trail = AllowTrailing, Require = AnyCount>(
+    pub Separated<T, By, Trail, Require>,
+);
+impl<
+    Tok,
+    E: SyntaxError + Debug,
+    D: Clone,
+    T: Syntax<Tok, E, D>,
+    By: Syntax<Tok, E, D>,
+    Trail: TrailingRule,
+    Require: ElementRequirementRule,
+> Syntax<Tok, E, D> for Punctuated<T, By, Trail, Require>
+{
+    type Item = Vec<T::Item>;
+    fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
+        Ok(Self(Separated::from_tokens(tokens, context)?))
+    }
+    fn to_tokens(&self) -> Vec<(Span, Tok)> {
+        self.0.to_tokens()
+    }
+    fn span(&self) -> Span {
+        self.0.span()
+    }
+    fn to_item(self) -> Self::Item {
+        self.0
+            .items
+            .into_iter()
+            .map(|(item, _)| item.to_item())
+            .collect()
     }
 }
 
@@ -624,7 +670,7 @@ pub struct Terminate<T, At> {
 impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>, At: Syntax<Tok, E, D>> Syntax<Tok, E, D>
     for Terminate<T, At>
 {
-    type Item = Vec<(Span, T::Item)>;
+    type Item = Vec<T::Item>;
     fn from_tokens(
         tokens: &mut cursor!(Tok),
         context: ParseContext<D>,
@@ -656,16 +702,13 @@ impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>, At: Syntax<Tok, E, D>>
             .map(|item| item.span())
             .fold(Span::null(), Add::add)
     }
-    fn to_item(self) -> (Span, Self::Item) {
-        (
-            self.span(),
-            self.items.into_iter().map(|item| item.to_item()).collect(),
-        )
+    fn to_item(self) -> Self::Item {
+        self.items.into_iter().map(|item| item.to_item()).collect()
     }
 }
 
 impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Vec<T> {
-    type Item = Vec<(Span, T::Item)>;
+    type Item = Vec<T::Item>;
     fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
         let mut out = vec![];
         loop {
@@ -691,11 +734,8 @@ impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for 
             .reduce(|a, b| a + b)
             .unwrap_or(Span::null())
     }
-    fn to_item(self) -> (Span, Self::Item) {
-        (
-            self.span(),
-            self.into_iter().map(|item| item.to_item()).collect(),
-        )
+    fn to_item(self) -> Self::Item {
+        self.into_iter().map(|item| item.to_item()).collect()
     }
 }
 
@@ -726,12 +766,12 @@ impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for 
             None => Span::null(),
         }
     }
-    fn to_item(self) -> (Span, Self::Item) {
-        (self.span(), self.map(|item| item.to_item().1))
+    fn to_item(self) -> Self::Item {
+        self.map(|item| item.to_item())
     }
 }
 
-/// Retains the richer structure of a syntactical element.
+/// Retains the richer structure of a syntactical element when `parse`ing.
 ///
 /// `KeepElements::<T>::to_item` will not call `T::to_item` and will instead just return `T`.
 pub struct KeepElements<T>(pub T);
@@ -746,16 +786,41 @@ impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for 
     fn span(&self) -> Span {
         self.0.span()
     }
-    fn to_item(self) -> (Span, Self::Item) {
+    fn to_item(self) -> Self::Item {
+        self.0
+    }
+}
+
+#[macro_export]
+macro_rules! SpannedTuple {
+    ($($element_type:ty),+) => {
+        ($crate::Spanned<$element_type>)
+    };
+}
+
+/// Retains the span of a syntactical element when `parse`ing.
+pub struct Spanned<T>(pub T);
+impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for Spanned<T> {
+    type Item = (Span, T);
+    fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
+        Ok(Self(T::from_tokens(tokens, context)?))
+    }
+    fn to_tokens(&self) -> Vec<(Span, Tok)> {
+        self.0.to_tokens()
+    }
+    fn span(&self) -> Span {
+        self.0.span()
+    }
+    fn to_item(self) -> Self::Item {
         (self.span(), self.0)
     }
 }
 
-/// Implements [`Syntax`] for each given `W<T>` where `T: Into<W>` and `W: Deref<Target = T>`.
+/// Implements [`Syntax`] for each given `W<T>` where `T: Into<W<T>>`, `T::Item: Into<W<T::Item>>`, and `W<T>: Deref<Target = T>`.
 macro_rules! wrapper_impl {
-    ($($wrapper:ty),+) => {
-        $(impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for $wrapper {
-            type Item = T::Item;
+    ($($wrapper_name:ident),+) => {
+        $(impl<Tok, E: SyntaxError, D: Clone, T: Syntax<Tok, E, D>> Syntax<Tok, E, D> for $wrapper_name<T> {
+            type Item = $wrapper_name<T::Item>;
             fn from_tokens(tokens: &mut cursor!(Tok), context: ParseContext<D>) -> Result<Self, E> {
                 Ok(T::from_tokens(tokens, context)?.into())
             }
@@ -765,11 +830,11 @@ macro_rules! wrapper_impl {
             fn span(&self) -> Span {
                 (**self).span()
             }
-            fn to_item(self) -> (Span, Self::Item) {
-                (*self).to_item()
+            fn to_item(self) -> Self::Item {
+                (*self).to_item().into()
             }
         })+
     };
 }
 
-wrapper_impl!(Box<T>);
+wrapper_impl!(Box);
